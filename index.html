@@ -600,25 +600,140 @@ function recentVals(field, n){
 }
 
 /* ---------- photo of the trailer or the load ---------- */
-function shrink(img, w, h){
-  const max = 320, scale = Math.min(1, max / Math.max(w,h));
+function shrink(img, w, h, max){
+  const cap = max || 320, scale = Math.min(1, cap / Math.max(w,h));
   const c = document.createElement("canvas");
   c.width = Math.round(w*scale); c.height = Math.round(h*scale);
   c.getContext("2d").drawImage(img, 0, 0, c.width, c.height);
-  return c.toDataURL("image/jpeg", 0.45);
+  return c.toDataURL("image/jpeg", max ? 0.8 : 0.45);
 }
-function readPhoto(file){
+function readPhoto(file, max){
   return new Promise(res => {
     const fr = new FileReader();
     fr.onload = () => {
       const img = new Image();
-      img.onload = () => res(shrink(img, img.width, img.height));
+      img.onload = () => res({ small: shrink(img, img.width, img.height),
+                               big:   max ? shrink(img, img.width, img.height, max) : null });
       img.onerror = () => res(null);
       img.src = fr.result;
     };
     fr.onerror = () => res(null);
     fr.readAsDataURL(file);
   });
+}
+
+/* ---------- reading the tag with the camera ----------
+   Tesseract is ~4 MB and only fetched the first time you use it,
+   then the browser caches it. Barcode stays the first choice;
+   this is for tags that won't scan. Nothing it reads is trusted
+   without you looking at it first. */
+const OCR = { loading:false, ready:false, busy:false };
+
+function loadOCR(){
+  if (OCR.ready) return Promise.resolve(true);
+  if (OCR.loading) return OCR.loading;
+  OCR.loading = new Promise((res, rej) => {
+    const s = document.createElement("script");
+    s.src = "https://unpkg.com/tesseract.js@7.0.0/dist/tesseract.min.js";
+    s.onload = () => { OCR.ready = true; res(true); };
+    s.onerror = () => { OCR.loading = null; rej(new Error("download failed")); };
+    document.head.appendChild(s);
+  });
+  return OCR.loading;
+}
+
+/* pull the three fields off a printed tag */
+function parseTag(raw){
+  const text = String(raw || "").replace(/\r/g, "");
+  const lines = text.split("\n").map(l => l.trim()).filter(Boolean);
+  const out = { order:"", due:"", dest:"", raw:text };
+
+  /* order / lot — labelled first, otherwise a lone 9-digit run */
+  const labelled = text.match(/(?:ORDER|LOT)[^\n0-9]{0,20}(\d{6,12})/i);
+  if (labelled) out.order = labelled[1];
+  else {
+    const nines = (text.match(/\b\d{9}\b/g) || [])
+      .filter(n => !/^0{4}/.test(n));
+    if (nines.length) out.order = nines[0];
+  }
+
+  /* due date — labels often sit on the row above their values, and the
+     tag carries a manufacture date too, so take the first date that
+     follows the DUE label and let the review step catch a mix-up */
+  const due = text.match(/DUE\s*DATE?[\s\S]{0,40}?(\d{1,2}\/\d{1,2}\/\d{2,4})/i);
+  if (due){
+    const [m,d,y] = due[1].split("/");
+    const yr = y.length === 2 ? "20"+y : y;
+    out.due = `${yr}-${String(m).padStart(2,"0")}-${String(d).padStart(2,"0")}`;
+  }
+
+  /* destination — a CITY, ST at the end of a line. Ship-to lines carry
+     plant codes and mill names ahead of the city, so work back from the
+     comma and keep only the city itself. */
+  const LEADS = ["BATON","SAN","LOS","LAS","NEW","FORT","ST","SAINT","SANTA",
+                 "LAKE","WEST","EAST","NORTH","SOUTH","PORT","MOUNT","BAY","GRAND"];
+  for (const l of lines){
+    const m = l.match(/([A-Z][A-Z .'-]{2,40}),\s*([A-Z]{2})\b/);
+    if (!m) continue;
+    const words = m[1].trim().split(/\s+/).filter(w => /^[A-Z][A-Z.'-]*$/.test(w));
+    if (!words.length) continue;
+    let city = words[words.length-1];
+    const before = words[words.length-2];
+    if (before && LEADS.includes(before)) city = before + " " + city;
+    const nice = city.split(" ")
+      .map(w => w.charAt(0) + w.slice(1).toLowerCase()).join(" ");
+    out.dest = nice + " " + m[2];
+    break;
+  }
+  return out;
+}
+
+async function readTag(dataUrl){
+  OCR.busy = true;
+  try {
+    await loadOCR();
+  } catch(e){
+    OCR.busy = false;
+    return openSheet(`<h2>Couldn't download the reader</h2>
+      <div class="sub">It needs signal the first time only.</div>
+      <div class="hint">Once it's downloaded on wifi it works in the yard without a connection. Until then, use the barcode or type it.</div>
+      <div class="btnrow"><button class="btn ghost" data-act="close">Close</button></div>`);
+  }
+  openSheet(`<h2>Reading the tag…</h2><div class="sub">A few seconds.</div>
+    <img class="thumb big" src="${dataUrl}" alt="">`);
+  let text = "";
+  try {
+    const r = await Tesseract.recognize(dataUrl, "eng");
+    text = r?.data?.text || "";
+  } catch(e){ text = ""; }
+  OCR.busy = false;
+  const f = parseTag(text);
+  UI.ocr = f;
+  showTagResult(dataUrl, f);
+}
+
+function showTagResult(dataUrl, f){
+  const got = f.order || f.due || f.dest;
+  let h = `<h2>${got ? "Here's what it read" : "Couldn't read it"}</h2>
+    <div class="sub">${got ? "Check each one against the tag before you use it." : "Try again square on with more light, or type it."}</div>
+    <img class="thumb big" src="${dataUrl}" alt="">`;
+  if (got){
+    h += `<div class="card">`;
+    const field = (lbl, val, key) => val
+      ? `<div class="row"><span class="body"><span class="t">${esc(val)}</span>
+         <span class="s">${lbl}</span></span>
+         <button class="btn ghost sm" style="width:auto;padding:0 14px" data-act="use-ocr" data-k="${key}">Use</button></div>`
+      : `<div class="row"><span class="body"><span class="t" style="color:var(--faint);font-weight:500">nothing found</span>
+         <span class="s">${lbl}</span></span></div>`;
+    h += field("Order #", f.order, "order");
+    h += field("Customer / delivery", f.dest, "dest");
+    h += field("Due date", f.due ? shortDate(f.due) : "", "due");
+    h += `<div class="btnrow"><button class="btn" data-act="use-ocr" data-k="all">Use everything it found</button></div>`;
+    h += `</div>`;
+  }
+  h += `<div class="btnrow"><button class="btn ghost sm" data-act="ocr-raw">See the raw text</button>
+    <button class="btn ghost sm" data-act="close">Close</button></div>`;
+  openSheet(h);
 }
 
 /* ---------- order barcode ---------- */
@@ -751,9 +866,18 @@ function viewWalk(){
           <div class="reticle"></div><div class="camnote" id="camnote">Starting the camera…</div></div>
           <button class="btn ghost sm" data-act="stopcam">Stop</button>`;
       } else if (canScan()){
-        h += `<button class="btn ghost sm" data-act="scan" style="margin-bottom:12px">
-          <svg viewBox="0 0 24 24"><path d="M3 7V5a2 2 0 0 1 2-2h2M17 3h2a2 2 0 0 1 2 2v2M21 17v2a2 2 0 0 1-2 2h-2M7 21H5a2 2 0 0 1-2-2v-2"/><path d="M7 8v8M10 8v8M13 8v8M17 8v8"/></svg>
-          Scan the order barcode</button>`;
+        h += `<div class="btnrow" style="margin:0 0 12px">
+          <button class="btn ghost sm" data-act="scan">
+            <svg viewBox="0 0 24 24"><path d="M3 7V5a2 2 0 0 1 2-2h2M17 3h2a2 2 0 0 1 2 2v2M21 17v2a2 2 0 0 1-2 2h-2M7 21H5a2 2 0 0 1-2-2v-2"/><path d="M7 8v8M10 8v8M13 8v8M17 8v8"/></svg>
+            Scan barcode</button>
+          <button class="btn ghost sm" data-act="read-tag">
+            <svg viewBox="0 0 24 24"><path d="M4 4h16v16H4z"/><path d="M8 9h8M8 13h8M8 17h4"/></svg>
+            Read the tag</button></div>`;
+      } else {
+        h += `<div class="btnrow" style="margin:0 0 12px">
+          <button class="btn ghost sm" data-act="read-tag">
+            <svg viewBox="0 0 24 24"><path d="M4 4h16v16H4z"/><path d="M8 9h8M8 13h8M8 17h4"/></svg>
+            Read the tag with the camera</button></div>`;
       }
       h += `<label class="f"><span class="lb">Customer / delivery location</span>
         <input name="dest" placeholder="Moultrie GA" value="${esc(UI.dest)}" data-act="field" data-f="dest"></label>`;
@@ -1238,6 +1362,25 @@ document.addEventListener("click", e => {
       if (inp) inp.click(); else toast("No camera here");
       break;
     }
+    case "read-tag": {
+      const inp = document.getElementById("photoinput");
+      if (!inp) return toast("No camera here");
+      inp.dataset.mode = "ocr"; inp.click();
+      break;
+    }
+    case "use-ocr": {
+      const f = UI.ocr || {}, k = b.dataset.k;
+      if (k === "all" || k === "order"){ if (f.order) UI.order = f.order; }
+      if (k === "all" || k === "dest"){  if (f.dest)  UI.dest  = f.dest;  }
+      if (k === "all" || k === "due"){   if (f.due)   UI.due   = f.due;   }
+      closeSheet(); render(); toast("Filled in — check it");
+      break;
+    }
+    case "ocr-raw":
+      openSheet(`<h2>Raw text</h2><div class="sub">Everything the camera made out.</div>
+        <pre class="out">${esc((UI.ocr && UI.ocr.raw) || "(nothing)")}</pre>
+        <div class="btnrow"><button class="btn ghost" data-act="close">Close</button></div>`);
+      break;
     case "drop-photo": UI.photo = null; render(); break;
 
     case "scan": openCam(); break;
@@ -1328,12 +1471,16 @@ document.addEventListener("click", e => {
 document.addEventListener("change", async e => {
   if (e.target.id !== "photoinput") return;
   const file = e.target.files && e.target.files[0];
+  const forOCR = e.target.dataset.mode === "ocr";
+  e.target.dataset.mode = "";
   e.target.value = "";
   if (!file) return;
-  toast("Reading photo…");
-  const thumb = await readPhoto(file);
-  if (!thumb) return toast("Couldn't read that photo");
-  UI.photo = thumb; render(); toast("Photo attached");
+  toast(forOCR ? "Reading…" : "Reading photo…");
+  const shot = await readPhoto(file, forOCR ? 1400 : 0);
+  if (!shot) return toast("Couldn't read that photo");
+  UI.photo = shot.small;
+  if (forOCR){ render(); readTag(shot.big); }
+  else { render(); toast("Photo attached"); }
 });
 
 document.addEventListener("input", e => {
