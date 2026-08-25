@@ -188,6 +188,22 @@ pre.out{white-space:pre;font-family:ui-monospace,Menlo,monospace;font-size:11px;
 .row.redtag::before{background:var(--red)!important}
 .row.redtag{border-color:#5a1a12}
 
+/* ---------- tally across the top of the sheet ---------- */
+.counts{display:grid;grid-template-columns:repeat(3,1fr);gap:7px;margin-bottom:4px}
+.count{background:var(--surface);border:1px solid var(--line);border-radius:12px;
+  padding:11px 10px;position:relative;overflow:hidden}
+.count .n{font-family:ui-monospace,Menlo,monospace;font-size:27px;font-weight:700;line-height:1}
+.count .l{font-size:10px;color:var(--dim);letter-spacing:.09em;text-transform:uppercase;margin-top:5px}
+.count::before{content:"";position:absolute;left:0;top:0;bottom:0;width:3px;background:var(--line)}
+.count.c-loaded::before{background:var(--green)}
+.count.c-roll::before{background:var(--blue)}
+.count.c-waste::before{background:var(--red)}
+.count.c-empty::before{background:var(--faint)}
+.count.c-red::before{background:var(--red)}
+.count.c-red .n{color:#ff8f7d}
+.count.c-total::before{background:var(--amber)}
+.count.c-total .n{color:var(--amber)}
+
 /* ---------- carrying a trailer ---------- */
 .moving{background:#1d1707;border:1px solid var(--amber-deep);border-radius:16px;
   padding:14px 16px;margin-bottom:12px;position:relative;overflow:hidden}
@@ -817,10 +833,14 @@ function rowFor(e, extra){
 
 function viewSheet(){
   const rows = onDay(today());
-  let h = `<div style="display:flex;gap:8px">
-    <div class="stat"><div class="n">${rows.length}</div><div class="l">On the sheet</div></div>
-    <div class="stat"><div class="n" style="color:var(--green)">${rows.filter(e=>kindOf(e.kind).load).length}</div><div class="l">Loaded</div></div>
-    <div class="stat"><div class="n" style="color:var(--amber)">${rows.filter(e=>e.due && daysOut(e.due) <= 2).length}</div><div class="l">Due soon</div></div>
+  const t = tallyOf(rows);
+  let h = `<div class="counts">
+    <div class="count c-loaded"><div class="n">${t.loaded}</div><div class="l">Loaded</div></div>
+    <div class="count c-roll"><div class="n">${t.roll}</div><div class="l">Roll stock</div></div>
+    <div class="count c-waste"><div class="n">${t.waste}</div><div class="l">Waste</div></div>
+    <div class="count c-empty"><div class="n">${t.empty}</div><div class="l">Empty</div></div>
+    <div class="count c-red"><div class="n">${t.red}</div><div class="l">Red tag</div></div>
+    <div class="count c-total"><div class="n">${rows.length}</div><div class="l">Total</div></div>
   </div>`;
   if (!rows.length){
     h += `<div class="empty"><b>Sheet is blank</b>Walk the line and rows land here in the order you took them.</div>`;
@@ -981,12 +1001,25 @@ function csv(){
       e.gps?e.gps.lat.toFixed(6):"", e.gps?e.gps.lng.toFixed(6):""].map(q).join(","));
   return L.join("\n");
 }
+function tallyOf(rows){
+  const t = { loaded:0, roll:0, waste:0, empty:0, red:0 };
+  for (const e of rows){
+    if (t[e.kind] !== undefined) t[e.kind]++;
+    if (e.red) t.red++;
+  }
+  return t;
+}
 function sheetText(){
   const rows = onDay(today());
+  const t = tallyOf(rows);
   const pad = (s,n) => String(s ?? "").slice(0,n).padEnd(n);
   const L = [];
   L.push(`YARD CHECK   ${S.plant || ""}   ${S.shift}`);
   L.push(new Date().toLocaleString());
+  L.push("");
+  L.push("=".repeat(96));
+  L.push(`  LOADED ${String(t.loaded).padStart(3)}     ROLL STOCK ${String(t.roll).padStart(3)}     WASTE ${String(t.waste).padStart(3)}     EMPTY ${String(t.empty).padStart(3)}     RED TAG ${String(t.red).padStart(3)}     TOTAL ${String(rows.length).padStart(3)}`);
+  L.push("=".repeat(96));
   L.push("");
   L.push(`${pad("#",4)}${pad("TRAILER #",11)}${pad("CUSTOMER / DELIVERY",22)}${pad("ORDER #",11)}${pad("DUE",7)}${pad("<1/2",5)}${pad("RET",4)}COMMENTS`);
   L.push("-".repeat(96));
