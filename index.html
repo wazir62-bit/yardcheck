@@ -179,6 +179,15 @@ pre.out{white-space:pre;font-family:ui-monospace,Menlo,monospace;font-size:11px;
 .cell.taken{background:var(--raised);border-color:var(--amber-deep)}
 .cell.taken .cn{color:var(--ink)}
 
+.tick.red.on{border-color:var(--red);background:#2a0f0a;color:#ff8f7d}
+.tick.red.on .box{border-color:var(--red);color:var(--red)}
+.thumbrow{display:flex;align-items:center;gap:12px;margin-bottom:4px}
+.thumb{width:70px;height:70px;border-radius:11px;object-fit:cover;
+  border:1px solid var(--line);background:var(--raised);flex:none}
+.thumb.big{width:100%;height:auto;aspect-ratio:4/3;margin-bottom:14px}
+.row.redtag::before{background:var(--red)!important}
+.row.redtag{border-color:#5a1a12}
+
 /* ---------- carrying a trailer ---------- */
 .moving{background:#1d1707;border:1px solid var(--amber-deep);border-radius:16px;
   padding:14px 16px;margin-bottom:12px;position:relative;overflow:hidden}
@@ -255,6 +264,9 @@ const KINDS = [
 ];
 const kindOf = id => KINDS.find(k => k.id === id) || KINDS[0];
 
+/* red tag reasons — the same list that was already in use */
+const RED_REASONS = ["Crush","Print","Wrong grade","Water","Glue skip","Other"];
+
 const PAPER = [
   { id:"got",    label:"Got it",     note:"read the tag"    },
   { id:"sealed", label:"Sealed",     note:"seal number"     },
@@ -267,7 +279,8 @@ let S, TAB = "walk", persists = true, mem = null;
 let POS = null, watchId = 0;
 let UI = { digits:"", kind:"loaded", paper:"got", place:"lot", door:"",
            dest:"", order:"", due:"", seal:"", comments:"",
-           half:false, returns:false, cam:false, q:"" };
+           half:false, returns:false, red:false, redWhy:"", photo:null,
+           cam:false, q:"" };
 
 function blank(){
   return { plant:"", shift:"Night shift", doorFrom:1, doorTo:12, entries:[], rows:[], move:null };
@@ -362,6 +375,20 @@ function trackMove(){
   S.move.settled = !!(stopped && gone >= 20);
   if (S.move.settled && !was && navigator.vibrate) navigator.vibrate([40,80,40]);
   return S.move.settled !== was;
+}
+
+/* start a move from the keypad — the number is already in your thumb */
+function beginMoveNumber(){
+  const n = UI.digits.trim();
+  if (!n) return toast("Trailer number first");
+  let e = onDay(today()).find(x => x.number === n);
+  if (!e){
+    /* not walked yet — put it on the sheet first so the move has a row to update */
+    commit();
+    e = onDay(today()).find(x => x.number === n);
+    if (!e) return;           /* commit refused it; the toast already said why */
+  }
+  beginMove(e.id);
 }
 
 function beginMove(entryId){
@@ -480,6 +507,7 @@ function stillToCheck(){
 function resetRow(){
   UI.digits = ""; UI.seal = ""; UI.comments = "";
   UI.half = false; UI.returns = false; UI.paper = "got";
+  UI.red = false; UI.redWhy = ""; UI.photo = null;
   /* customer, order and due carry — a run of loads usually shares them */
 }
 
@@ -512,9 +540,12 @@ function commit(){
     seal:        (k.load && UI.paper === "sealed") ? UI.seal : "",
     comments: UI.comments,
     half: !!UI.half, returns: !!UI.returns,
+    red: !!UI.red, redWhy: UI.red ? UI.redWhy : "",
+    photo: UI.photo || null,
     gps: POS ? { lat:POS.lat, lng:POS.lng, acc:POS.acc } : null,
   });
-  save();
+  try { save(); }
+  catch(err){ toast("Storage full — back up and clear"); }
   if (navigator.vibrate) navigator.vibrate(50);
   resetRow(); render(); window.scrollTo(0,0);
   toast(number + " on the sheet");
@@ -527,6 +558,28 @@ function recentVals(field, n){
     if (v) seen.add(v);
   }
   return [...seen];
+}
+
+/* ---------- photo of the trailer or the load ---------- */
+function shrink(img, w, h){
+  const max = 320, scale = Math.min(1, max / Math.max(w,h));
+  const c = document.createElement("canvas");
+  c.width = Math.round(w*scale); c.height = Math.round(h*scale);
+  c.getContext("2d").drawImage(img, 0, 0, c.width, c.height);
+  return c.toDataURL("image/jpeg", 0.45);
+}
+function readPhoto(file){
+  return new Promise(res => {
+    const fr = new FileReader();
+    fr.onload = () => {
+      const img = new Image();
+      img.onload = () => res(shrink(img, img.width, img.height));
+      img.onerror = () => res(null);
+      img.src = fr.result;
+    };
+    fr.onerror = () => res(null);
+    fr.readAsDataURL(file);
+  });
 }
 
 /* ---------- order barcode ---------- */
@@ -601,7 +654,11 @@ function viewWalk(){
         <button data-act="key" data-k="0">0</button>
         <button class="fn" data-act="key" data-k="del">Back</button></div>`;
 
-  h += `<button class="btn" data-act="commit" ${n?"":"disabled"}>Add to the sheet</button>`;
+  h += `<div class="btnrow" style="margin-top:0">
+    <button class="btn" data-act="commit" ${n?"":"disabled"}>Add to the sheet</button></div>
+    <div class="btnrow"><button class="btn ghost" data-act="move-number" ${n?"":"disabled"}>
+      <svg viewBox="0 0 24 24"><path d="M1 7h13v10H1zM14 10h4l3 3v4h-7z"/><circle cx="6" cy="18" r="2"/><circle cx="18" cy="18" r="2"/></svg>
+      Moving this one — follow me</button></div>`;
 
   h += `<div class="eyebrow">What's on it</div><div class="pick">`;
   for (const kk of KINDS)
@@ -680,12 +737,34 @@ function viewWalk(){
       h += `<div class="hint" style="margin-top:10px">Logged as couldn't read — number and location only. Add it and keep walking.</div>`;
   }
 
+  h += `<div class="eyebrow">Condition</div>`;
+  h += `<button class="tick red ${UI.red?"on":""}" style="width:100%" data-act="tick" data-t="red">
+    <span class="box">✓</span>Red tag this trailer</button>`;
+  if (UI.red){
+    h += `<div class="chips" style="margin-top:8px">`;
+    for (const r of RED_REASONS)
+      h += `<button class="chip ${UI.redWhy===r?"on":""}" data-act="setf" data-f="redWhy" data-v="${esc(r)}">${esc(r)}</button>`;
+    h += `</div>`;
+  }
   h += `<div class="ticks">
     <button class="tick ${UI.half?"on":""}" data-act="tick" data-t="half"><span class="box">✓</span>Less than ½ full</button>
     <button class="tick ${UI.returns?"on":""}" data-act="tick" data-t="returns"><span class="box">✓</span>Returns</button>
   </div>`;
 
-  h += `<div style="margin-top:10px"><label class="f" style="margin-bottom:0">
+  h += `<div class="eyebrow">Photo</div>
+    <input type="file" accept="image/*" capture="environment" id="photoinput" hidden>`;
+  if (UI.photo){
+    h += `<div class="thumbrow"><img class="thumb" src="${UI.photo}" alt="">
+      <div style="flex:1"><div style="font-size:13.5px;font-weight:700">Photo attached</div>
+      <div style="font-size:12px;color:var(--faint)">Saves with this trailer.</div></div>
+      <button class="btn ghost sm" style="width:auto;padding:0 14px" data-act="drop-photo">Remove</button></div>`;
+  } else {
+    h += `<button class="btn ghost sm" data-act="take-photo">
+      <svg viewBox="0 0 24 24"><path d="M3 8a2 2 0 0 1 2-2h2l1.5-2h7L17 6h2a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><circle cx="12" cy="13" r="3.5"/></svg>
+      Take a photo</button>`;
+  }
+
+  h += `<div style="margin-top:12px"><label class="f" style="margin-bottom:0">
     <span class="lb">Comments</span>
     <textarea name="comments" placeholder="Flat tire, blocked in, doors frozen…" data-act="field" data-f="comments">${esc(UI.comments)}</textarea></label></div>`;
 
@@ -715,7 +794,9 @@ function moveBanner(){
 
 function rowFor(e, extra){
   const k = kindOf(e.kind);
-  const bits = [k.label, placeText(e)];
+  const bits = [];
+  if (e.red) bits.push("RED TAG" + (e.redWhy ? " · " + e.redWhy : ""));
+  bits.push(k.label, placeText(e));
   if (e.seal) bits.push("seal " + e.seal);
   else if (e.paper === "noread") bits.push("couldn't read");
   else {
@@ -724,9 +805,10 @@ function rowFor(e, extra){
   }
   if (e.half) bits.push("< ½");
   if (e.returns) bits.push("returns");
+  if (e.photo) bits.push("photo");
   if (e.comments) bits.push(e.comments);
   const d = daysOut(e.due);
-  return `<button class="row ${k.cls} ${extra||""} ${e.due && d !== null && d <= 2 ? "due":""}" data-act="entry" data-id="${e.id}">
+  return `<button class="row ${k.cls} ${e.red?"redtag":""} ${extra||""} ${e.due && d !== null && d <= 2 ? "due":""}" data-act="entry" data-id="${e.id}">
     <span class="ln">${lineNo(e)}</span>
     <span class="body"><span class="t">${esc(e.number)}</span>
     <span class="s">${esc(bits.join(" · "))}</span></span>
@@ -760,6 +842,12 @@ function viewCheck(){
     <div class="stat"><div class="n" style="color:var(--green)">${r.arrived.length}</div><div class="l">New in</div></div>
     <div class="stat"><div class="n" style="color:var(--faint)">${r.gone.length}</div><div class="l">Gone</div></div>
   </div>`;
+
+  const redToday = onDay(today()).filter(e => e.red);
+  if (redToday.length){
+    h += `<div class="eyebrow">Red tagged · ${redToday.length}</div>`;
+    for (const e of redToday) h += rowFor(e);
+  }
 
   const dueSoon = onDay(today()).filter(e => e.due && daysOut(e.due) <= 3)
     .sort((a,b) => a.due.localeCompare(b.due));
@@ -874,18 +962,21 @@ function viewLog(){
 /* ---------- output: the paper form's columns ---------- */
 function commentCell(e){
   const bits = [];
+  if (e.red) bits.push("RED TAG" + (e.redWhy ? " (" + e.redWhy + ")" : ""));
   if (e.kind && e.kind !== "loaded") bits.push(kindOf(e.kind).label);
   if (e.seal) bits.push("SEALED " + e.seal);
   if (e.paper === "noread") bits.push("paperwork unreadable");
   if (e.carried) bits.push("unchanged from last walk");
+  if (e.photo) bits.push("photo on file");
   if (e.comments) bits.push(e.comments);
   return bits.join("; ");
 }
 function csv(){
   const q = s => `"${String(s ?? "").replace(/"/g,'""')}"`;
-  const L = ["Line,Trailer #,Customer / Delivery Location,Order #,Due Date,Comments,Less Than 1/2 Full,Returns,Where,Date,Time,Lat,Lng"];
+  const L = ["Line,Trailer #,Customer / Delivery Location,Order #,Due Date,Comments,Red Tag,Less Than 1/2 Full,Returns,Where,Date,Time,Lat,Lng"];
   for (const e of S.entries.slice().sort((a,b) => a.at-b.at))
     L.push([lineNo(e), e.number, e.destination, e.order, e.due, commentCell(e),
+      e.red ? (e.redWhy || "X") : "",
       e.half?"X":"", e.returns?"X":"", placeText(e), e.date, clock(e.at),
       e.gps?e.gps.lat.toFixed(6):"", e.gps?e.gps.lng.toFixed(6):""].map(q).join(","));
   return L.join("\n");
@@ -910,6 +1001,12 @@ function sheetText(){
   }
   const due = rows.filter(e => e.due && daysOut(e.due) <= 3);
   if (due.length) L.push("Due within 3 days: " + due.map(e => `${e.number} (${shortDate(e.due)})`).join(", "));
+  const red = rows.filter(e => e.red);
+  if (red.length){
+    L.push("", "RED TAGGED");
+    for (const e of red)
+      L.push(`  ${e.number.padEnd(10)} ${(e.redWhy||"no reason given").padEnd(14)} ${placeText(e)}`);
+  }
   const noread = rows.filter(e => e.paper === "noread");
   if (noread.length) L.push("Paperwork unreadable: " + noread.map(e => e.number).join(", "));
   return L.join("\n");
@@ -934,6 +1031,7 @@ function modalEntry(id){
   openSheet(`<h2 class="mono">${esc(e.number)}</h2>
     <div class="sub">Line ${lineNo(e)} · ${esc(k.label)} · ${esc(placeText(e))} · ${new Date(e.at).toLocaleString()}</div>
     ${e.gps ? `<div class="hint" style="margin:-8px 0 14px">${e.gps.lat.toFixed(5)}, ${e.gps.lng.toFixed(5)} (±${e.gps.acc} m)</div>` : ""}
+    ${e.photo ? `<img class="thumb big" src="${e.photo}" alt="">` : ""}
     <div class="card">
       <label class="f"><span class="lb">Trailer #</span><input name="eNum" class="mono" value="${esc(e.number)}"></label>
       ${k.load ? `
@@ -952,6 +1050,8 @@ function modalEntry(id){
         <button class="tick ${e.half?"on":""}" data-act="etick" data-id="${e.id}" data-t="half"><span class="box">✓</span>Less than ½ full</button>
         <button class="tick ${e.returns?"on":""}" data-act="etick" data-id="${e.id}" data-t="returns"><span class="box">✓</span>Returns</button>
       </div>
+      <button class="tick red ${e.red?"on":""}" style="width:100%;margin-bottom:12px" data-act="etick" data-id="${e.id}" data-t="red">
+        <span class="box">✓</span>Red tag${e.redWhy?" · "+esc(e.redWhy):""}</button>
       <button class="btn" data-act="save-entry" data-id="${e.id}">Save changes</button>
     </div>
     <div class="btnrow"><button class="btn" data-act="begin-move" data-id="${e.id}">Move this trailer</button></div>
@@ -1063,12 +1163,19 @@ document.addEventListener("click", e => {
     case "door":  UI.place = "door"; UI.door = b.dataset.d; render(); break;
     case "tick":  UI[b.dataset.t] = !UI[b.dataset.t]; render(); break;
     case "setf":  UI[b.dataset.f] = b.dataset.v; render(); break;
+    case "take-photo": {
+      const inp = document.getElementById("photoinput");
+      if (inp) inp.click(); else toast("No camera here");
+      break;
+    }
+    case "drop-photo": UI.photo = null; render(); break;
 
     case "scan": openCam(); break;
     case "stopcam": closeCam(); render(); break;
 
     case "entry": modalEntry(id); break;
     case "begin-move": beginMove(id); break;
+    case "move-number": beginMoveNumber(); break;
     case "drop": dropMove(null); break;
     case "cancel-move": cancelMove(); break;
     case "drop-door": {
@@ -1146,6 +1253,17 @@ document.addEventListener("click", e => {
       if (!confirm("Delete every logged row? The learned rows stay.")) break;
       S.entries = []; save(); closeSheet(); render(); toast("Cleared"); break;
   }
+});
+
+document.addEventListener("change", async e => {
+  if (e.target.id !== "photoinput") return;
+  const file = e.target.files && e.target.files[0];
+  e.target.value = "";
+  if (!file) return;
+  toast("Reading photo…");
+  const thumb = await readPhoto(file);
+  if (!thumb) return toast("Couldn't read that photo");
+  UI.photo = thumb; render(); toast("Photo attached");
 });
 
 document.addEventListener("input", e => {
