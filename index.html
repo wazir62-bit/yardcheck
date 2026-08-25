@@ -394,6 +394,29 @@ function trackMove(){
 }
 
 /* start a move from the keypad — the number is already in your thumb */
+/* an empty space in the line — worth recording so you know where there's room */
+function commitOpen(){
+  let door = null, rowId = null;
+  if (UI.place === "door"){
+    door = Number(UI.door) || null;
+    if (!door) return toast("Which door?");
+  } else if (fixUsable() && POS.acc <= 30){
+    rowId = learnRow(POS).id;
+  }
+  S.entries.push({
+    id:uid(), date:today(), at:Date.now(),
+    number:"", open:true, kind:null, paper:null,
+    door, rowId,
+    destination:"", order:"", due:"", seal:"", comments:"",
+    half:false, returns:false, red:false, redWhy:"", photo:null,
+    gps: POS ? { lat:POS.lat, lng:POS.lng, acc:POS.acc } : null,
+  });
+  save();
+  if (navigator.vibrate) navigator.vibrate(25);
+  resetRow(); render(); window.scrollTo(0,0);
+  toast(door ? "Door " + door + " empty" : "Open space logged");
+}
+
 function beginMoveNumber(){
   const n = UI.digits.trim();
   if (!n) return toast("Trailer number first");
@@ -500,8 +523,8 @@ function lastSeen(number){
 }
 function reconcile(){
   const prev = prevWalkDay();
-  const now = new Map(onDay(today()).map(e => [e.number, e]));
-  const then = new Map(prev ? onDay(prev).map(e => [e.number, e]) : []);
+  const now = new Map(onDay(today()).filter(e => e.number && !e.open).map(e => [e.number, e]));
+  const then = new Map(prev ? onDay(prev).filter(e => e.number && !e.open).map(e => [e.number, e]) : []);
   const arrived = [], gone = [], moved = [];
   for (const [n,e] of now){
     if (!then.has(n)) arrived.push(e);
@@ -516,8 +539,8 @@ function reconcile(){
 /* here last walk, not yet accounted for on this one */
 function stillToCheck(){
   const prev = prevWalkDay(); if (!prev) return [];
-  const now = new Set(onDay(today()).map(e => e.number));
-  return onDay(prev).filter(e => !now.has(e.number));
+  const now = new Set(onDay(today()).filter(e => e.number).map(e => e.number));
+  return onDay(prev).filter(e => e.number && !e.open && !now.has(e.number));
 }
 
 function resetRow(){
@@ -674,7 +697,8 @@ function viewWalk(){
     <button class="btn" data-act="commit" ${n?"":"disabled"}>Add to the sheet</button></div>
     <div class="btnrow"><button class="btn ghost" data-act="move-number" ${n?"":"disabled"}>
       <svg viewBox="0 0 24 24"><path d="M1 7h13v10H1zM14 10h4l3 3v4h-7z"/><circle cx="6" cy="18" r="2"/><circle cx="18" cy="18" r="2"/></svg>
-      Moving this one — follow me</button></div>`;
+      Moving this one — follow me</button></div>
+    <div class="btnrow"><button class="btn ghost" data-act="open-spot">Nothing here — open space</button></div>`;
 
   h += `<div class="eyebrow">What's on it</div><div class="pick">`;
   for (const kk of KINDS)
@@ -809,6 +833,13 @@ function moveBanner(){
 }
 
 function rowFor(e, extra){
+  if (e.open){
+    return `<button class="row open ${extra||""}" data-act="entry" data-id="${e.id}">
+      <span class="ln">${lineNo(e)}</span>
+      <span class="body"><span class="t" style="color:var(--faint);font-weight:500">open space</span>
+      <span class="s">${esc(placeText(e))} · nothing parked</span></span>
+      <span class="side">${clock(e.at)}</span></button>`;
+  }
   const k = kindOf(e.kind);
   const bits = [];
   if (e.red) bits.push("RED TAG" + (e.redWhy ? " · " + e.redWhy : ""));
@@ -840,8 +871,9 @@ function viewSheet(){
     <div class="count c-waste"><div class="n">${t.waste}</div><div class="l">Waste</div></div>
     <div class="count c-empty"><div class="n">${t.empty}</div><div class="l">Empty</div></div>
     <div class="count c-red"><div class="n">${t.red}</div><div class="l">Red tag</div></div>
-    <div class="count c-total"><div class="n">${rows.length}</div><div class="l">Total</div></div>
+    <div class="count c-total"><div class="n">${t.trailers}</div><div class="l">Trailers</div></div>
   </div>`;
+  if (t.open) h += `<div class="hint" style="margin:8px 0 0">${t.open} open space${t.open>1?"s":""} logged.</div>`;
   if (!rows.length){
     h += `<div class="empty"><b>Sheet is blank</b>Walk the line and rows land here in the order you took them.</div>`;
     return h;
@@ -1002,8 +1034,10 @@ function csv(){
   return L.join("\n");
 }
 function tallyOf(rows){
-  const t = { loaded:0, roll:0, waste:0, empty:0, red:0 };
+  const t = { loaded:0, roll:0, waste:0, empty:0, red:0, open:0, trailers:0 };
   for (const e of rows){
+    if (e.open){ t.open++; continue; }
+    t.trailers++;
     if (t[e.kind] !== undefined) t[e.kind]++;
     if (e.red) t.red++;
   }
@@ -1018,13 +1052,15 @@ function sheetText(){
   L.push(new Date().toLocaleString());
   L.push("");
   L.push("=".repeat(96));
-  L.push(`  LOADED ${String(t.loaded).padStart(3)}     ROLL STOCK ${String(t.roll).padStart(3)}     WASTE ${String(t.waste).padStart(3)}     EMPTY ${String(t.empty).padStart(3)}     RED TAG ${String(t.red).padStart(3)}     TOTAL ${String(rows.length).padStart(3)}`);
+  L.push(`  LOADED ${String(t.loaded).padStart(3)}     ROLL STOCK ${String(t.roll).padStart(3)}     WASTE ${String(t.waste).padStart(3)}     EMPTY ${String(t.empty).padStart(3)}     RED TAG ${String(t.red).padStart(3)}     TRAILERS ${String(t.trailers).padStart(3)}${t.open ? "     OPEN SPACES " + String(t.open).padStart(3) : ""}`);
   L.push("=".repeat(96));
   L.push("");
   L.push(`${pad("#",4)}${pad("TRAILER #",11)}${pad("CUSTOMER / DELIVERY",22)}${pad("ORDER #",11)}${pad("DUE",7)}${pad("<1/2",5)}${pad("RET",4)}COMMENTS`);
   L.push("-".repeat(96));
-  for (const e of rows)
+  for (const e of rows){
+    if (e.open){ L.push(`${pad(lineNo(e),4)}${pad("—",11)}${pad("",22)}${pad("",11)}${pad("",7)}${pad("",5)}${pad("",4)}open space${e.door?" at door "+e.door:""}`); continue; }
     L.push(`${pad(lineNo(e),4)}${pad(e.number,11)}${pad(e.destination,22)}${pad(e.order,11)}${pad(shortDate(e.due),7)}${pad(e.half?"X":"",5)}${pad(e.returns?"X":"",4)}${commentCell(e)}`);
+  }
   const r = reconcile();
   L.push("", "-".repeat(96));
   L.push(`Trailers on the sheet: ${rows.length}`);
@@ -1189,6 +1225,7 @@ document.addEventListener("click", e => {
       else if (UI.digits.length < 12) UI.digits += b.dataset.k;
       render(); break;
     case "commit": commit(); break;
+    case "open-spot": commitOpen(); break;
 
     case "kind":  UI.kind = b.dataset.k; render(); break;
     case "paper": UI.paper = b.dataset.p; render(); break;
